@@ -22,6 +22,75 @@ set -x
 
 ########################################################################
 
+# Create script on broker to register nodes automatically
+configure_nodeRegisterScript()
+{
+cat <<EOF > /root/register_nodes.sh
+#!/bin/sh
+
+# ---------------------------------------------------------------
+# Function Definitions 
+# ---------------------------------------------------------------
+
+check_err()
+  {
+    if [ \$? -ne 0 ]; then
+      echo " ";
+      echo "Error: \$1";
+      echo "Aborting setup.";
+      echo " ";
+      exit 1;
+    fi
+  }
+
+domain=\`hostname | cut -f2- -d.\`;
+keyfile=/var/named/${zone}.key;
+NODELIST="/root/node_list";
+
+if [ "${district_name}" != "" ]; then
+  oo-admin-ctl-district -c create -n ${district_name} -p ${district_size};
+fi
+
+cat /var/log/httpd/access_log | grep "pub?host=" | sed 's/ -.*pub?host=/_/g' | sed 's/ HTTP.*//g' > \${NODELIST};
+nodes=( \`cat \${NODELIST}\` );
+rm -f \${NODELIST};
+
+for node in "\${nodes[@]}"
+do
+  node_ip=\`echo \${node} | sed 's/_.*//'\`;
+  node_host=\`echo \${node} | sed 's/.*_//'\`;
+  
+  # ideally this domain value should be the same as what we are using for the key file
+  # however it is possible for the domain to have been specified differently for a host
+  domain=\`echo \${node_host} | cut -f2- -d.\`;
+  node_host=\`echo \${node_host} | cut -f1 -d.\`;
+
+  # add node to DNS
+  echo "Adding DNS registry for Host: \${node_host}.\${domain} IP: \${node_ip}";
+  oo-register-dns -h \${node_host} -d \${domain} -n \${node_ip} -k \${keyfile};
+  check_err "DNS registration failed.";
+
+  # verify DNS resolution of node entry
+  echo "Verifying DNS resolution....";
+  dig @127.0.0.1 \${node_host}.\${domain} | grep "\${node_host}" | grep "\${node_ip}" > /dev/null;
+  check_err "DNS lookup of node failed.";
+
+  # looking for host in mco ping results
+  echo "performing 'mco ping' validation...";
+  oo-mco ping | grep "\${node_hostname}.\${domain}" > /dev/null;
+  check_err "mco ping failed";
+
+  if [ "${district_name}" != "" ]; then
+    # add node to district
+    oo-admin-ctl-district -c add-node -n ${district_name} -i \${node_host}.\${domain};
+  fi
+done
+
+echo "Node registration complete!";
+EOF
+chmod +x /root/register_nodes.sh;
+}
+
 # Synchronize the system clock to the NTP servers and then synchronize
 # hardware clock with that.
 synchronize_clock()
@@ -2302,7 +2371,8 @@ configure_openshift()
   broker && configure_broker_ssl_cert
   broker && configure_access_keys_on_broker
   broker && configure_rhc
-
+  broker && configure_nodeRegisterScript
+  
   node && configure_port_proxy
   node && configure_gears
   node && configure_node
